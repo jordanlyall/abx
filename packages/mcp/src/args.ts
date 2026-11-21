@@ -190,7 +190,8 @@ export function resolveProjectDir(dir: string | undefined, roots: readonly strin
 /** A project directory for a deploy: required, inside a root, and never the home folder itself. */
 export function resolveDeployProjectDir(dir: string, roots: readonly string[] = ROOTS): string {
   const real = resolveProjectDir(dir, roots);
-  if (real === realpathSync(homedir())) {
+  // The home folder itself, or any folder that contains it (e.g. /Users under a broad explicit root).
+  if (inside(real, realpathSync(homedir())) !== undefined) {
     throw new GuardError(`projectDir ${dir} is too broad. Point it at the project's own folder.`);
   }
   return real;
@@ -225,7 +226,7 @@ const MAX_FOLDER_FILES = 10_000;
  * `1.svg` could otherwise pull in a file from anywhere. Each one must resolve inside the folder and
  * have an allowed type. Hidden entries and subfolders are ignored, because the CLI ignores them too.
  */
-export function checkFolderEntries(field: string, realDir: string): void {
+export function checkFolderEntries(field: string, realDir: string, home: string = homedir()): void {
   const allowed = FOLDER_EXTENSIONS[field];
   let count = 0;
   for (const name of readdirSync(realDir)) {
@@ -240,7 +241,7 @@ export function checkFolderEntries(field: string, realDir: string): void {
     if (!statSync(target).isFile()) continue;
     if (++count > MAX_FOLDER_FILES) throw new GuardError(`${field}: more than ${MAX_FOLDER_FILES} files.`);
     const rel = inside(realDir, target);
-    if (rel === undefined || hasDotSegment(rel)) {
+    if (rel === undefined || hasDotSegment(rel) || isSensitiveHomePath(target, home)) {
       throw new GuardError(`${field}: ${name} points outside the folder (or at a hidden file). Copy the file in instead of linking it.`);
     }
     if (!allowed.has(extname(target).toLowerCase())) {
@@ -250,7 +251,7 @@ export function checkFolderEntries(field: string, realDir: string): void {
 }
 
 /** A file input, resolved and confined to the project directory (symlinks included), never hidden. */
-export function confinePath(field: string, value: string, root: string): string {
+export function confinePath(field: string, value: string, root: string, home: string = homedir()): string {
   const abs = resolve(root, value);
   if (!existsSync(abs)) throw new GuardError(`${field}: ${value} does not exist under the project directory.`);
   const real = realpathSync(abs);
@@ -259,6 +260,7 @@ export function confinePath(field: string, value: string, root: string): string 
     throw new GuardError(`${field}: ${value} resolves outside the project directory. File inputs must live inside projectDir.`);
   }
   if (hasDotSegment(rel)) throw new GuardError(`${field}: ${value} is a hidden file or inside a hidden folder.`);
+  if (isSensitiveHomePath(real, home)) throw new GuardError(`${field}: ${value} is inside a hidden or app-data folder under home.`);
   const allowed = FILE_EXTENSIONS[field];
   if (allowed) {
     if (!statSync(real).isFile()) throw new GuardError(`${field}: ${value} must be a file.`);
@@ -267,7 +269,7 @@ export function confinePath(field: string, value: string, root: string): string 
     }
   } else {
     if (!statSync(real).isDirectory()) throw new GuardError(`${field}: ${value} must be a folder.`);
-    checkFolderEntries(field, real);
+    checkFolderEntries(field, real, home);
   }
   return rel === '' ? '.' : rel;
 }

@@ -213,6 +213,31 @@ test('the home folder, or a folder above it, is never an implicit root', () => {
   assert.deepEqual(startupRoots({ABX_MCP_ROOTS: home}, home, home), [home]);
 });
 
+test('a broad root cannot reach app-data or hidden folders under home through a file input', () => {
+  // A stand-in home under a temp "users" folder, which plays a broad explicit root like /Users.
+  const users = project();
+  const home = join(users, 'someone');
+  mkdirSync(join(home, 'Library', 'Keys'), {recursive: true});
+  mkdirSync(join(home, '.ssh'));
+  mkdirSync(join(home, 'art'));
+  writeFileSync(join(home, 'Library', 'Keys', 'k.png'), 'x');
+  writeFileSync(join(home, '.ssh', 'k.png'), 'x');
+  writeFileSync(join(home, 'art', 'ok.png'), 'x');
+  assert.throws(() => confinePath('image', 'someone/Library/Keys/k.png', users, home), /app-data folder under home/);
+  assert.throws(() => confinePath('image', 'someone/.ssh/k.png', users, home), /hidden/);
+  assert.equal(confinePath('image', 'someone/art/ok.png', users, home), join('someone', 'art', 'ok.png'));
+  // A folder input whose entry links into Library is refused too.
+  mkdirSync(join(users, 'series2'));
+  symlinkSync(join(home, 'Library', 'Keys', 'k.png'), join(users, 'series2', '1.png'));
+  assert.throws(() => confinePath('dir', 'series2', users, home), /points outside the folder/);
+});
+
+test('a deploy projectDir that contains the home folder is refused', () => {
+  const home = realpathSync(homedir());
+  const parent = realpathSync(join(home, '..'));
+  assert.throws(() => resolveDeployProjectDir(parent, [parent]), /too broad/);
+});
+
 test('app-data folders under home are refused even inside an explicit root', () => {
   const home = realpathSync(homedir());
   for (const name of ['Library', 'AppData']) {
