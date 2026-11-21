@@ -4,7 +4,16 @@ import {mkdirSync, mkdtempSync, realpathSync, symlinkSync, writeFileSync} from '
 import {homedir, tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {parseFlags} from '../../cli/src/flags.ts';
-import {buildDeployArgv, buildStateArgv, buildVerifyArgv, confinePath, resolveDeployProjectDir, resolveProjectDir, type DeployArgs} from '../src/args.ts';
+import {
+  buildDeployArgv,
+  buildStateArgv,
+  buildVerifyArgv,
+  confinePath,
+  resolveDeployProjectDir,
+  resolveProjectDir,
+  startupRoots,
+  type DeployArgs,
+} from '../src/args.ts';
 import {BLANKED_ENV, buildChildEnv, parseJsonOutput} from '../src/cli.ts';
 import {GuardError} from '../src/guards.ts';
 
@@ -109,12 +118,56 @@ test('file inputs are confined to the project directory, symlinks included', () 
   assert.throws(() => confinePath('image', 'missing.svg', dir), /does not exist/);
 });
 
-test('projectDir must be an existing absolute directory, and a deploy root cannot be / or home', () => {
-  assert.throws(() => resolveProjectDir('relative/dir'), /absolute/);
-  assert.throws(() => resolveProjectDir('/definitely/not/here'), /not an existing directory/);
-  assert.throws(() => resolveDeployProjectDir('/'), /too broad/);
-  assert.throws(() => resolveDeployProjectDir(homedir()), /too broad/);
-  assert.equal(resolveDeployProjectDir(project()).startsWith(realpathSync(tmpdir())), true);
+test('startup roots: cwd plus ABX_MCP_ROOTS, never a filesystem root or a relative path', () => {
+  const a = project();
+  const b = project();
+  assert.deepEqual(startupRoots({ABX_MCP_ROOTS: [b, 'relative', '/', '/definitely/not/here'].join(':')}, a), [a, b]);
+  assert.deepEqual(startupRoots({}, '/'), []);
+});
+
+test('projectDir must sit inside a startup root, outside any hidden folder', () => {
+  const root = project();
+  mkdirSync(join(root, 'work'));
+  mkdirSync(join(root, '.ssh'));
+  mkdirSync(join(root, 'work', '.git'));
+  const elsewhere = project();
+  assert.equal(resolveProjectDir(undefined, [root]), root);
+  assert.equal(resolveProjectDir(join(root, 'work'), [root]), join(root, 'work'));
+  assert.throws(() => resolveProjectDir('relative/dir', [root]), /absolute/);
+  assert.throws(() => resolveProjectDir('/definitely/not/here', [root]), /not an existing directory/);
+  assert.throws(() => resolveProjectDir(elsewhere, [root]), /outside the folders this server may use/);
+  assert.throws(() => resolveProjectDir('/', [root]), /outside the folders/);
+  assert.throws(() => resolveProjectDir(join(root, '.ssh'), [root]), /hidden folder/);
+  assert.throws(() => resolveProjectDir(join(root, 'work', '.git'), [root]), /hidden folder/);
+  assert.throws(() => resolveProjectDir(root, []), /no usable project root/);
+  // A symlink inside the root that points out of it is resolved before the check.
+  symlinkSync(elsewhere, join(root, 'escape'));
+  assert.throws(() => resolveProjectDir(join(root, 'escape'), [root]), /outside the folders/);
+});
+
+test('regression: a server started in $HOME cannot read ~/.ssh through a deploy', () => {
+  const home = realpathSync(homedir());
+  assert.throws(() => resolveDeployProjectDir(home, [home]), /too broad/);
+  assert.throws(() => resolveDeployProjectDir(join(home, '.ssh'), [home]), /hidden folder|not an existing directory/);
+  // Even inside a real project folder, a hidden file or hidden folder is never a valid input.
+  const dir = project();
+  writeFileSync(join(dir, '.id_rsa.js'), 'x');
+  mkdirSync(join(dir, '.keys'));
+  writeFileSync(join(dir, '.keys', 'k.js'), 'x');
+  assert.throws(() => buildDeployArgv({command: 'deploy-code', projectDir: dir, for: OWNER, script: '.id_rsa.js'}, 'unsigned', dir), /hidden/);
+  assert.throws(() => buildDeployArgv({command: 'deploy-code', projectDir: dir, for: OWNER, script: '.keys/k.js'}, 'unsigned', dir), /hidden/);
+});
+
+test('file inputs must have an expected type; folder inputs must be folders', () => {
+  const dir = project();
+  writeFileSync(join(dir, 'notes.txt'), 'x');
+  writeFileSync(join(dir, 'run.sh'), 'x');
+  assert.throws(() => confinePath('image', 'notes.txt', dir), /must be one of \.svg/);
+  assert.throws(() => confinePath('script', 'run.sh', dir), /must be one of \.js/);
+  assert.throws(() => confinePath('image', 'series', dir), /must be a file/);
+  assert.throws(() => confinePath('dir', 'art.svg', dir), /must be a folder/);
+  assert.equal(confinePath('dir', 'series', dir), 'series');
+  assert.equal(confinePath('codeDir', '.', dir), '.');
 });
 
 test('secret-looking free text is refused before it reaches the CLI', () => {

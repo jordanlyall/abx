@@ -74,8 +74,8 @@ live in [`plugins/abx/`](plugins/abx). To try the Cursor plugin locally, link th
 | `abx_verify` | `abx verify <address> --json` | Served bytes checked against the on-chain commitment (the project must be added to the node first) |
 
 Each tool takes an optional `network` (testnet key, default `base-sepolia`) and an absolute
-`projectDir` the CLI runs in. The deploy tools require `projectDir`, and it cannot be `/` or your home
-folder; the others default to the server's working directory.
+`projectDir` the CLI runs in. The deploy tools require `projectDir`; the others default to the
+server's working directory.
 
 ### Safety model
 
@@ -93,8 +93,14 @@ folder; the others default to the server's working directory.
   owner write are not reachable: the server only spawns `capabilities`, `doctor`, `deploy`,
   `deploy-series`, `deploy-code`, `state`, and `verify`.
 - **No injection.** The CLI is started with `spawn` and an argv array, never a shell. Every flag is
-  passed as `--key=value`, so a value such as `--send` stays a value. File inputs must resolve
-  inside `projectDir`, symlinks included.
+  passed as `--key=value`, so a value such as `--send` stays a value.
+- **Confined to your project folders.** The folders a tool may touch are fixed when the server
+  starts: its working directory, plus any absolute paths you list in `ABX_MCP_ROOTS` (separated by
+  `:`) in the MCP host config. A tool argument cannot widen them. `projectDir` must sit inside one,
+  never inside a hidden folder such as `~/.ssh`, and a deploy's `projectDir` cannot be your home
+  folder. File inputs must resolve inside `projectDir` (symlinks included), cannot be hidden, and
+  must have an expected type: `.svg .png .jpg .jpeg .gif .webp .avif` for `image`, and
+  `.js .mjs .cjs .html .htm` for `script`.
 - **Nothing secret is echoed.** Output is scrubbed of the values of secret-named environment
   variables (from the process and the project's `.env`) and of URL credentials before it is
   returned. The server logs nothing.

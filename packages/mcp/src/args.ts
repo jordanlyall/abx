@@ -4,7 +4,7 @@
  */
 import {existsSync, realpathSync, statSync} from 'node:fs';
 import {homedir} from 'node:os';
-import {isAbsolute, parse, relative, resolve, sep} from 'node:path';
+import {delimiter, extname, isAbsolute, parse, relative, resolve, sep} from 'node:path';
 import {z} from 'zod';
 import {assertNoSecretLikeValue, assertSafeArgv, GuardError} from './guards.js';
 
@@ -108,31 +108,96 @@ const FLAG_FOR: Partial<Record<keyof DeployArgs, string>> = {
 const PATH_FIELDS: ReadonlySet<keyof DeployArgs> = new Set(['image', 'dir', 'script', 'codeDir']);
 const TEXT_FIELDS: ReadonlySet<keyof DeployArgs> = new Set(['name', 'symbol', 'description', 'externalUrl', 'publicBaseUrl']);
 
-/** Resolve the working directory for a call: an existing absolute directory, or the server's cwd. */
-export function resolveProjectDir(dir: string | undefined, fallback = process.cwd()): string {
-  if (dir === undefined) return fallback;
-  if (!isAbsolute(dir)) throw new GuardError('projectDir must be an absolute path.');
-  if (!existsSync(dir) || !statSync(dir).isDirectory()) throw new GuardError(`projectDir ${dir} is not an existing directory.`);
-  return realpathSync(dir);
+/** `child` relative to `parent` when it is inside it (or equal), else undefined. Both real paths. */
+function inside(parent: string, child: string): string | undefined {
+  const rel = relative(parent, child);
+  if (isAbsolute(rel) || rel.split(sep)[0] === '..') return undefined;
+  return rel;
 }
 
-/** A project directory for a deploy: required, and never a filesystem root or the home folder, which would make confinement meaningless. */
-export function resolveDeployProjectDir(dir: string): string {
-  const real = resolveProjectDir(dir);
-  if (real === parse(real).root || real === realpathSync(homedir())) {
+/** True when any segment of a relative path is a dot-folder or dot-file (`.ssh`, `.env`, `.git`, …). */
+function hasDotSegment(rel: string): boolean {
+  return rel !== '' && rel.split(sep).some((segment) => segment.startsWith('.'));
+}
+
+/**
+ * The directories a tool call may work in, pinned when the server starts and never taken from a
+ * tool argument: the server's working directory, plus any absolute paths in `ABX_MCP_ROOTS`
+ * (path-delimiter separated) that the user sets in their MCP host config. A filesystem root is never
+ * a valid root.
+ */
+export function startupRoots(env: NodeJS.ProcessEnv = process.env, cwd: string = process.cwd()): string[] {
+  const candidates = [cwd, ...(env.ABX_MCP_ROOTS ?? '').split(delimiter).map((p) => p.trim()).filter(Boolean)];
+  const roots: string[] = [];
+  for (const candidate of candidates) {
+    if (!isAbsolute(candidate) || !existsSync(candidate) || !statSync(candidate).isDirectory()) continue;
+    const real = realpathSync(candidate);
+    if (real === parse(real).root) continue;
+    if (!roots.includes(real)) roots.push(real);
+  }
+  return roots;
+}
+
+const ROOTS = startupRoots();
+
+/**
+ * Resolve the working directory for a call. It must be an existing absolute directory inside one of
+ * the startup roots, with no dot-folder on the way (so `~/.ssh` or `~/.config` can never be a project
+ * even when the server was started in the home folder). Omitted, it is the server's cwd.
+ */
+export function resolveProjectDir(dir: string | undefined, roots: readonly string[] = ROOTS): string {
+  if (roots.length === 0) {
+    throw new GuardError('no usable project root: start the server inside a project folder, or set ABX_MCP_ROOTS in the MCP host config.');
+  }
+  if (dir === undefined) return roots[0];
+  if (!isAbsolute(dir)) throw new GuardError('projectDir must be an absolute path.');
+  if (!existsSync(dir) || !statSync(dir).isDirectory()) throw new GuardError(`projectDir ${dir} is not an existing directory.`);
+  const real = realpathSync(dir);
+  for (const root of roots) {
+    const rel = inside(root, real);
+    if (rel === undefined) continue;
+    if (hasDotSegment(rel)) throw new GuardError(`projectDir ${dir} is inside a hidden folder. Use the project's own folder.`);
+    return real;
+  }
+  throw new GuardError(
+    `projectDir ${dir} is outside the folders this server may use (${roots.join(', ')}). ` +
+      'Add a folder with ABX_MCP_ROOTS in the MCP host config; it cannot be widened from a tool call.',
+  );
+}
+
+/** A project directory for a deploy: required, inside a root, and never the home folder itself. */
+export function resolveDeployProjectDir(dir: string, roots: readonly string[] = ROOTS): string {
+  const real = resolveProjectDir(dir, roots);
+  if (real === realpathSync(homedir())) {
     throw new GuardError(`projectDir ${dir} is too broad. Point it at the project's own folder.`);
   }
   return real;
 }
 
-/** A file input, resolved and confined to the project directory (symlinks included). */
+/** File types each path input may name. Folders (dir, codeDir) are checked for location only. */
+const FILE_EXTENSIONS: Partial<Record<string, ReadonlySet<string>>> = {
+  image: new Set(['.svg', '.png', '.jpg', '.jpeg', '.gif', '.webp', '.avif']),
+  script: new Set(['.js', '.mjs', '.cjs', '.html', '.htm']),
+};
+
+/** A file input, resolved and confined to the project directory (symlinks included), never hidden. */
 export function confinePath(field: string, value: string, root: string): string {
   const abs = resolve(root, value);
   if (!existsSync(abs)) throw new GuardError(`${field}: ${value} does not exist under the project directory.`);
   const real = realpathSync(abs);
-  const rel = relative(root, real);
-  if (isAbsolute(rel) || rel.split(sep)[0] === '..') {
+  const rel = inside(root, real);
+  if (rel === undefined) {
     throw new GuardError(`${field}: ${value} resolves outside the project directory. File inputs must live inside projectDir.`);
+  }
+  if (hasDotSegment(rel)) throw new GuardError(`${field}: ${value} is a hidden file or inside a hidden folder.`);
+  const allowed = FILE_EXTENSIONS[field];
+  if (allowed) {
+    if (!statSync(real).isFile()) throw new GuardError(`${field}: ${value} must be a file.`);
+    if (!allowed.has(extname(real).toLowerCase())) {
+      throw new GuardError(`${field}: ${value} must be one of ${[...allowed].join(' ')}.`);
+    }
+  } else if (!statSync(real).isDirectory()) {
+    throw new GuardError(`${field}: ${value} must be a folder.`);
   }
   return rel === '' ? '.' : rel;
 }
