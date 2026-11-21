@@ -58,6 +58,27 @@ providers are covered once, with chain-specific context loaded only when needed.
 official third-party tools, prefers self-contained designs for long-lived output, and explains any
 lifetime service dependency and owner-controlled recovery before choosing it.
 
+## Use ABX from an MCP host
+
+`@artblocks/abx-mcp` is a local stdio MCP server, named `abx`, for hosts that use MCP tools rather
+than skills. It wraps the CLI you already have:
+
+```json
+{
+  "mcpServers": {
+    "abx": {"command": "npx", "args": ["-y", "@artblocks/abx-mcp"]}
+  }
+}
+```
+
+Its tools read capabilities, run `abx doctor`, plan a project, and run deploy dry runs. They also
+prepare unsigned deploy transactions and read a project's state or verify its served bytes. Every
+run is on a testnet. The server never signs, sends, or broadcasts, and never takes a key, mnemonic,
+or RPC URL as an argument. To deploy, sign the unsigned transactions in your own wallet, or run the
+CLI yourself. Cursor and Grok Build plugin manifests live in the repository's `plugins/abx/` folder.
+
+This server is separate from the hosted Art Blocks MCP, which covers the Art Blocks platform.
+
 ## What the skill does not do
 
 The skill does not choose your edition size, storage, royalties, or sale price. It asks, shows the

@@ -126,7 +126,7 @@ for (const path of repositoryFiles) {
   }
 }
 
-for (const name of ['cli', 'effects', 'indexer', 'sdk', 'storage', 'storage-arweave', 'token-api']) {
+for (const name of ['cli', 'effects', 'indexer', 'mcp', 'sdk', 'storage', 'storage-arweave', 'token-api']) {
   const path = `packages/${name}/package.json`;
   const pkg = JSON.parse(readFileSync(resolve(root, path), 'utf8'));
   if (pkg.license !== 'MIT') errors.push(`${path} must declare license MIT`);

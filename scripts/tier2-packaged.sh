@@ -37,11 +37,11 @@ echo ""
 #    with EUNSUPPORTEDPROTOCOL.
 echo "  packing"
 mkdir -p "$WORK/tgz"
-for p in sdk creator-wallet cli indexer token-api storage storage-arweave effects; do
+for p in sdk creator-wallet cli indexer token-api storage storage-arweave effects mcp; do
   (cd "$DEV_ROOT/packages/$p" && pnpm pack --pack-destination "$WORK/tgz" >/dev/null)
 done
 COUNT=$(ls -1 "$WORK/tgz"/*.tgz | wc -l | tr -d ' ')
-[ "$COUNT" -eq 8 ] && ok "packed $COUNT tarballs" || bad "expected 8 tarballs, got $COUNT"
+[ "$COUNT" -eq 9 ] && ok "packed $COUNT tarballs" || bad "expected 9 tarballs, got $COUNT"
 
 # 2. Install them together into a clean consumer. Passing all eight local tarballs at once keeps the
 #    check honest: npm satisfies each @artblocks/* dep from OUR tarball rather than downloading the
@@ -87,7 +87,7 @@ mkdir -p "$WORK/consumer-default"
 # The storage-arweave tarball is deliberately excluded — a default `npm install @artblocks/abx-cli`
 # never sees it (it's not in any package's dependencies/optionalDependencies, only an OPTIONAL peer
 # of @artblocks/abx-storage — see the comment above).
-DEFAULT_TGZ=$(ls "$WORK"/tgz/*.tgz | grep -v 'abx-storage-arweave')
+DEFAULT_TGZ=$(ls "$WORK"/tgz/*.tgz | grep -v -e 'abx-storage-arweave' -e 'abx-mcp')
 (
   cd "$WORK/consumer-default"
   npm init -y >/dev/null 2>&1
@@ -165,6 +165,33 @@ fi
 #    against OUR lockfile's viem, so a real incompatibility between viem's declared types and
 #    ours (a generic reshaped under a semver-compatible bump) would slip past every one of them
 #    and land on a consumer's first `npm install`. This is the one place that gets checked.
+echo "  MCP server (@artblocks/abx-mcp) from the packed tarball"
+MCP_BIN="$WORK/consumer/node_modules/.bin/abx-mcp"
+[ -x "$MCP_BIN" ] && ok "bin/abx-mcp is executable" || bad "node_modules/.bin/abx-mcp missing or not executable"
+MCP_OUT=$(cd "$WORK/consumer" && env HOME="$TEST_HOME" ABX_NO_UPDATE_CHECK=1 node --input-type=module -e "
+const {Client} = await import('@modelcontextprotocol/sdk/client/index.js');
+const {StdioClientTransport} = await import('@modelcontextprotocol/sdk/client/stdio.js');
+const client = new Client({name: 'tier2', version: '0'});
+await client.connect(new StdioClientTransport({command: '$MCP_BIN', env: {...process.env}}));
+const {tools} = await client.listTools();
+const caps = await client.callTool({name: 'abx_capabilities', arguments: {}});
+console.log('TOOLS ' + tools.map((t) => t.name).sort().join(','));
+console.log('CAPS ' + (caps.isError ? 'error' : typeof caps.structuredContent?.result?.schemaVersion));
+await client.close();
+" 2>&1)
+if printf '%s' "$MCP_OUT" | grep -q "^TOOLS abx_capabilities,abx_deploy_dry_run,abx_deploy_unsigned,abx_doctor,abx_plan,abx_status,abx_verify$"; then
+  ok "abx-mcp lists its seven tools over stdio"
+else
+  bad "abx-mcp did not list the expected tools"
+  note "$MCP_OUT"
+fi
+if printf '%s' "$MCP_OUT" | grep -q "^CAPS number$"; then
+  ok "abx-mcp reaches the packed CLI (abx_capabilities round trip)"
+else
+  bad "abx-mcp could not run the packed CLI"
+  note "$MCP_OUT"
+fi
+
 echo "  typechecking published SDK against consumer's own viem"
 # Pin the consumer's TypeScript to the same major.minor this repo declares (root package.json:
 # "typescript": "^5.8.0"). The variable under test here is VIEM, not TypeScript — compiling the
