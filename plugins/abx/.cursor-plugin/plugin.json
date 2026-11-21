@@ -1,0 +1,12 @@
+{
+  "name": "abx",
+  "version": "0.1.0",
+  "description": "ABX CLI as a local MCP server: capabilities, doctor, and testnet deploy dry runs and unsigned transactions. Never signs or sends.",
+  "author": {
+    "name": "Art Blocks"
+  },
+  "homepage": "https://docs.abx.io",
+  "repository": "https://github.com/ArtBlocks/abx",
+  "license": "MIT",
+  "keywords": ["abx", "art blocks abx", "abx cli", "abx nft"]
+}
