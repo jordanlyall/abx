@@ -95,12 +95,17 @@ server's working directory.
 - **No injection.** The CLI is started with `spawn` and an argv array, never a shell. Every flag is
   passed as `--key=value`, so a value such as `--send` stays a value.
 - **Confined to your project folders.** The folders a tool may touch are fixed when the server
-  starts: its working directory, plus any absolute paths you list in `ABX_MCP_ROOTS` (separated by
-  `:`) in the MCP host config. A tool argument cannot widen them. `projectDir` must sit inside one,
-  never inside a hidden folder such as `~/.ssh`, and a deploy's `projectDir` cannot be your home
-  folder. File inputs must resolve inside `projectDir` (symlinks included), cannot be hidden, and
-  must have an expected type: `.svg .png .jpg .jpeg .gif .webp .avif` for `image`, and
-  `.js .mjs .cjs .html .htm` for `script`.
+  starts, and a tool argument cannot widen them. They are the server's working directory, plus any
+  absolute paths you list in `ABX_MCP_ROOTS` (separated by `:`) in the MCP host config. A working
+  directory that is your home folder, or contains it, is not used unless you list it in
+  `ABX_MCP_ROOTS` yourself. `projectDir` must sit inside a root, never inside a hidden folder such as
+  `~/.ssh` or an app-data folder such as `~/Library`. A deploy's `projectDir` cannot be your home
+  folder.
+- **File inputs are checked one by one.** They must resolve inside `projectDir` (symlinks included),
+  cannot be hidden, and must have an expected type: `.svg .png .jpg .jpeg .gif .webp .avif` for
+  `image`, and `.js .mjs .cjs .html .htm` for `script`. For folder inputs (`dir`, `codeDir`), every
+  file the CLI would read must resolve inside the folder and be media, or for `codeDir`, web build
+  files such as HTML, JS, CSS, JSON, WASM and fonts.
 - **Nothing secret is echoed.** Output is scrubbed of the values of secret-named environment
   variables (from the process and the project's `.env`) and of URL credentials before it is
   returned. The server logs nothing.

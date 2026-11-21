@@ -1,6 +1,6 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {mkdirSync, mkdtempSync, realpathSync, symlinkSync, writeFileSync} from 'node:fs';
+import {existsSync, mkdirSync, mkdtempSync, realpathSync, symlinkSync, writeFileSync} from 'node:fs';
 import {homedir, tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {parseFlags} from '../../cli/src/flags.ts';
@@ -167,7 +167,59 @@ test('file inputs must have an expected type; folder inputs must be folders', ()
   assert.throws(() => confinePath('image', 'series', dir), /must be a file/);
   assert.throws(() => confinePath('dir', 'art.svg', dir), /must be a folder/);
   assert.equal(confinePath('dir', 'series', dir), 'series');
-  assert.equal(confinePath('codeDir', '.', dir), '.');
+  // run.sh at the top level is exactly what the CLI would read from a code folder, so it is refused.
+  assert.throws(() => confinePath('codeDir', '.', dir), /run\.sh has a type/);
+  assert.equal(confinePath('codeDir', '.', project()), '.');
+});
+
+test('folder inputs: every file the CLI would read is checked, symlinks resolved', () => {
+  const dir = project();
+  const outside = realpathSync(mkdtempSync(join(tmpdir(), 'abx-mcp-outside-')));
+  writeFileSync(join(outside, 'id_rsa'), 'x');
+  writeFileSync(join(outside, 'pic.svg'), '<svg/>');
+  // Ignored, exactly as the CLI ignores them: hidden entries and subfolders.
+  writeFileSync(join(dir, 'series', '.DS_Store'), 'x');
+  mkdirSync(join(dir, 'series', 'nested'));
+  writeFileSync(join(dir, 'series', 'nested', 'run.sh'), 'x');
+  assert.equal(confinePath('dir', 'series', dir), 'series');
+  // A link inside the folder to a file inside it is fine.
+  symlinkSync(join(dir, 'series', '1.svg'), join(dir, 'series', '2.svg'));
+  assert.equal(confinePath('dir', 'series', dir), 'series');
+  // A link that leaves the folder is refused, whatever its name or target type.
+  symlinkSync(join(outside, 'pic.svg'), join(dir, 'series', '3.svg'));
+  assert.throws(() => confinePath('dir', 'series', dir), /3\.svg points outside the folder/);
+  const code = project();
+  mkdirSync(join(code, 'build'));
+  writeFileSync(join(code, 'build', 'index.html'), '<html></html>');
+  writeFileSync(join(code, 'build', 'app.js'), '');
+  writeFileSync(join(code, 'build', 'style.css'), '');
+  assert.equal(confinePath('codeDir', 'build', code), 'build');
+  symlinkSync(join(outside, 'id_rsa'), join(code, 'build', 'key.js'));
+  assert.throws(() => confinePath('codeDir', 'build', code), /key\.js points outside the folder/);
+  // Documents are not media: a series folder carrying one is refused.
+  const docs = project();
+  writeFileSync(join(docs, 'series', 'notes.pdf'), 'x');
+  assert.throws(() => confinePath('dir', 'series', docs), /notes\.pdf has a type/);
+});
+
+test('the home folder, or a folder above it, is never an implicit root', () => {
+  const home = project();
+  mkdirSync(join(home, 'proj'));
+  const parent = realpathSync(join(home, '..'));
+  assert.deepEqual(startupRoots({}, home, home), []);
+  assert.deepEqual(startupRoots({}, parent, home), []);
+  assert.deepEqual(startupRoots({}, join(home, 'proj'), home), [join(home, 'proj')]);
+  // Listing it explicitly is the user's call, and still allowed.
+  assert.deepEqual(startupRoots({ABX_MCP_ROOTS: home}, home, home), [home]);
+});
+
+test('app-data folders under home are refused even inside an explicit root', () => {
+  const home = realpathSync(homedir());
+  for (const name of ['Library', 'AppData']) {
+    const path = join(home, name);
+    if (!existsSync(path)) continue;
+    assert.throws(() => resolveProjectDir(path, [home]), /app-data folder/);
+  }
 });
 
 test('secret-looking free text is refused before it reaches the CLI', () => {

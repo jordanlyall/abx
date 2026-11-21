@@ -2,9 +2,9 @@
  * Tool input schemas and the argv each tool hands to the CLI. Pure: no I/O except resolving and
  * checking paths, so every rule here is unit-testable without spawning anything.
  */
-import {existsSync, realpathSync, statSync} from 'node:fs';
+import {existsSync, readdirSync, realpathSync, statSync} from 'node:fs';
 import {homedir} from 'node:os';
-import {delimiter, extname, isAbsolute, parse, relative, resolve, sep} from 'node:path';
+import {delimiter, extname, isAbsolute, join, parse, relative, resolve, sep} from 'node:path';
 import {z} from 'zod';
 import {assertNoSecretLikeValue, assertSafeArgv, GuardError} from './guards.js';
 
@@ -126,16 +126,37 @@ function hasDotSegment(rel: string): boolean {
  * (path-delimiter separated) that the user sets in their MCP host config. A filesystem root is never
  * a valid root.
  */
-export function startupRoots(env: NodeJS.ProcessEnv = process.env, cwd: string = process.cwd()): string[] {
-  const candidates = [cwd, ...(env.ABX_MCP_ROOTS ?? '').split(delimiter).map((p) => p.trim()).filter(Boolean)];
+export function startupRoots(
+  env: NodeJS.ProcessEnv = process.env,
+  cwd: string = process.cwd(),
+  home: string = homedir(),
+): string[] {
+  const realHome = existsSync(home) ? realpathSync(home) : home;
+  const explicit = (env.ABX_MCP_ROOTS ?? '').split(delimiter).map((p) => p.trim()).filter(Boolean);
   const roots: string[] = [];
-  for (const candidate of candidates) {
-    if (!isAbsolute(candidate) || !existsSync(candidate) || !statSync(candidate).isDirectory()) continue;
+  const add = (candidate: string, implicit: boolean) => {
+    if (!isAbsolute(candidate) || !existsSync(candidate) || !statSync(candidate).isDirectory()) return;
     const real = realpathSync(candidate);
-    if (real === parse(real).root) continue;
+    if (real === parse(real).root) return;
+    // Fail closed: a working directory that IS the home folder, or contains it, is not a project.
+    // Hosts often start servers there. Only an explicit ABX_MCP_ROOTS entry can grant that much.
+    if (implicit && inside(real, realHome) !== undefined) return;
     if (!roots.includes(real)) roots.push(real);
-  }
+  };
+  add(cwd, true);
+  for (const candidate of explicit) add(candidate, false);
   return roots;
+}
+
+/** Folders directly under the home folder that hold app data and credentials, never a project. */
+const SENSITIVE_HOME_FOLDERS: ReadonlySet<string> = new Set(['library', 'appdata', 'application data']);
+
+function isSensitiveHomePath(real: string, home: string = homedir()): boolean {
+  if (!existsSync(home)) return false;
+  const rel = inside(realpathSync(home), real);
+  if (rel === undefined || rel === '') return false;
+  const first = rel.split(sep)[0].toLowerCase();
+  return first.startsWith('.') || SENSITIVE_HOME_FOLDERS.has(first);
 }
 
 const ROOTS = startupRoots();
@@ -157,6 +178,7 @@ export function resolveProjectDir(dir: string | undefined, roots: readonly strin
     const rel = inside(root, real);
     if (rel === undefined) continue;
     if (hasDotSegment(rel)) throw new GuardError(`projectDir ${dir} is inside a hidden folder. Use the project's own folder.`);
+    if (isSensitiveHomePath(real)) throw new GuardError(`projectDir ${dir} is inside an app-data folder (Library, AppData). Use the project's own folder.`);
     return real;
   }
   throw new GuardError(
@@ -174,11 +196,58 @@ export function resolveDeployProjectDir(dir: string, roots: readonly string[] = 
   return real;
 }
 
-/** File types each path input may name. Folders (dir, codeDir) are checked for location only. */
+const IMAGE_EXTENSIONS = ['.svg', '.png', '.jpg', '.jpeg', '.gif', '.webp', '.avif'];
+/** Media the SDK's content-type table knows (packages/sdk/src/mime.ts), minus documents and data. */
+const MEDIA_EXTENSIONS = [...IMAGE_EXTENSIONS, '.tif', '.tiff', '.mp4', '.webm', '.glb', '.gltf', '.mp3', '.wav', '.flac'];
+
+/** File types each single-file input may name. */
 const FILE_EXTENSIONS: Partial<Record<string, ReadonlySet<string>>> = {
-  image: new Set(['.svg', '.png', '.jpg', '.jpeg', '.gif', '.webp', '.avif']),
+  image: new Set(IMAGE_EXTENSIONS),
   script: new Set(['.js', '.mjs', '.cjs', '.html', '.htm']),
 };
+
+/** File types allowed inside each folder input, checked for every file the CLI would read. */
+const FOLDER_EXTENSIONS: Record<string, ReadonlySet<string>> = {
+  dir: new Set(MEDIA_EXTENSIONS),
+  codeDir: new Set([
+    ...MEDIA_EXTENSIONS,
+    '.html', '.htm', '.js', '.mjs', '.cjs', '.css', '.json', '.wasm', '.txt',
+    '.glsl', '.frag', '.vert', '.woff', '.woff2', '.ttf', '.otf',
+  ]),
+};
+
+/** A folder holds at most this many files the CLI would read; more is refused rather than scanned. */
+const MAX_FOLDER_FILES = 10_000;
+
+/**
+ * Check every file the CLI will read from a folder input. The CLI reads the folder's top-level,
+ * non-hidden regular files and follows symlinks (`readdirSync` + `statSync`), so a symlink named
+ * `1.svg` could otherwise pull in a file from anywhere. Each one must resolve inside the folder and
+ * have an allowed type. Hidden entries and subfolders are ignored, because the CLI ignores them too.
+ */
+export function checkFolderEntries(field: string, realDir: string): void {
+  const allowed = FOLDER_EXTENSIONS[field];
+  let count = 0;
+  for (const name of readdirSync(realDir)) {
+    if (name.startsWith('.')) continue;
+    const entry = join(realDir, name);
+    let target: string;
+    try {
+      target = realpathSync(entry);
+    } catch {
+      throw new GuardError(`${field}: ${name} is a broken link.`);
+    }
+    if (!statSync(target).isFile()) continue;
+    if (++count > MAX_FOLDER_FILES) throw new GuardError(`${field}: more than ${MAX_FOLDER_FILES} files.`);
+    const rel = inside(realDir, target);
+    if (rel === undefined || hasDotSegment(rel)) {
+      throw new GuardError(`${field}: ${name} points outside the folder (or at a hidden file). Copy the file in instead of linking it.`);
+    }
+    if (!allowed.has(extname(target).toLowerCase())) {
+      throw new GuardError(`${field}: ${name} has a type this server does not pass to the CLI. Allowed: ${[...allowed].join(' ')}.`);
+    }
+  }
+}
 
 /** A file input, resolved and confined to the project directory (symlinks included), never hidden. */
 export function confinePath(field: string, value: string, root: string): string {
@@ -196,8 +265,9 @@ export function confinePath(field: string, value: string, root: string): string 
     if (!allowed.has(extname(real).toLowerCase())) {
       throw new GuardError(`${field}: ${value} must be one of ${[...allowed].join(' ')}.`);
     }
-  } else if (!statSync(real).isDirectory()) {
-    throw new GuardError(`${field}: ${value} must be a folder.`);
+  } else {
+    if (!statSync(real).isDirectory()) throw new GuardError(`${field}: ${value} must be a folder.`);
+    checkFolderEntries(field, real);
   }
   return rel === '' ? '.' : rel;
 }
